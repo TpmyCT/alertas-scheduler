@@ -7,7 +7,7 @@ import os
 import time
 import logging
 from datetime import datetime, timedelta
-from scheduler import AlertScheduler
+from main import AlertScheduler
 
 # Configurar logging
 logging.basicConfig(

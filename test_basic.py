@@ -44,7 +44,7 @@ def test_basic_functionality():
     print("=" * 40)
     
     try:
-        from scheduler import AlertScheduler
+        from main import AlertScheduler
         scheduler = AlertScheduler()
         
         # Probar generación de código único

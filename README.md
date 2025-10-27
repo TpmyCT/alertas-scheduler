@@ -84,7 +84,7 @@ INSERT INTO CT_Alertas_Admin_Emails (adm_Email, adm_Nombre) VALUES
 ## 🚀 Uso
 
 ```bash
-python scheduler.py
+python main.py
 ```
 
 ## 📊 Flujo de Ejecución
