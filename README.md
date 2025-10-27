@@ -1,190 +1,121 @@
-# 🚀 Scheduler de Alertas Automático
+# 📬 Scheduler de Alertas
 
-## 📋 Descripción
+Sistema de alertas automatizado con arquitectura stateless que consulta una vista SQL cada minuto y aplica filtros en Python para determinar qué alertas enviar.
 
-Este sistema automatizado lee alertas desde una base de datos SQL Server y las programa automáticamente usando **APScheduler**. Cuando llega el momento configurado, envía webhooks HTTP y registra los resultados en un log.
+## ✨ Características
 
-## ✨ Características Principales
+- 🔄 **Polling cada minuto** sincronizado al segundo 00
+- 🎯 **3 filtros en Python**: ventana de hora, frecuencia, anti-duplicados
+- 📧 **Notificaciones por email** cuando hay errores
+- 📝 **Logging detallado** con emojis y timestamps
+- 🔁 **Sin estado** - cada iteración es independiente
+- ⚡ **Manejo robusto** de errores sin detener el procesamiento
 
-- 🔄 **Programación automática** de alertas desde base de datos
-- 📅 **Múltiples frecuencias**: Diario, Semanal, Mensual
-- 🔔 **Ejecución automática** de webhooks en horarios configurados
-- 📝 **Logging completo** de todas las ejecuciones
-- 🔍 **Monitoreo en tiempo real** de nuevas alertas
-- 🧹 **Interfaz limpia** con mensajes fáciles de entender
-- ⚡ **Refresco automático** cuando se detectan cambios
-
-## 🛠️ Tecnologías Utilizadas
+## 🛠️ Tecnologías
 
 - **Python 3.x**
-- **APScheduler** - Para programación de tareas
 - **pyodbc** - Conexión a SQL Server
 - **requests** - Envío de webhooks HTTP
-- **python-dotenv** - Manejo de variables de entorno
+- **smtplib** - Envío de emails (incluido en Python)
+- **python-dotenv** - Variables de entorno
 
-## 📊 Tipos de Alertas Soportadas
+## 🗄️ Base de Datos Requerida
 
-| Frecuencia | Descripción | Campo Requerido |
-|------------|-------------|----------------|
-| `DIARIO` | Se ejecuta todos los días a la hora especificada | `hora_envio` |
-| `SEMANAL` | Se ejecuta en días específicos de la semana | `hora_envio`, `dias_semana` |
-| `MENSUAL` | Se ejecuta en días específicos de cada mes | `hora_envio`, `dias_mes` |
-| `ANUAL` | Se ejecuta en días específicos de enero cada año | `hora_envio`, `dias_mes` |
+### Vista: `VW_Scheduler_Alertas`
+Debe devolver todas las alertas activas con estos campos:
+- `config_id`, `tipo_disparo`, `frecuencia`, `hora_envio`, `dias_semana`, `dias_mes`
+- `tipo_codigo`, `empresa_codigo`, `empresa_conexion`, `persona_codigo`, `canal_codigo`
+- `webhook_url` y campos descriptivos
 
-## 🗃️ Estructura de Base de Datos
+### Tabla: `CT_Alertas_Mensajes`
+Para tracking de mensajes enviados:
+```sql
+CREATE TABLE CT_Alertas_Mensajes (
+    msg_id INT IDENTITY PRIMARY KEY,
+    msg_Cod VARCHAR(6),
+    msgcfg_Cod VARCHAR(6),
+    msg_Estado VARCHAR(20),
+    msg_FechaEnvio DATETIME,
+    msg_FechaRespuesta DATETIME
+);
+```
 
-### Tabla: `ct_alertas_configuracion`
-
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| `id` | int | ID único de la alerta |
-| `tipo_alerta_id` | int | Tipo de alerta |
-| `destinatario_id` | int | ID del destinatario |
-| `canal_id` | int | ID del canal |
-| `tipo_disparo` | nvarchar(40) | Tipo de disparo |
-| `frecuencia` | nvarchar(40) | DIARIO/SEMANAL/MENSUAL/ANUAL |
-| `hora_envio` | time | Hora de envío (HH:MM:SS) |
-| `dias_semana` | nvarchar(40) | Días para alertas semanales (1-7) |
-| `dias_mes` | nvarchar(40) | Días del mes para alertas mensuales/anuales |
-| `webhook_id` | int | ID del webhook a ejecutar |
-| `activo` | bit | Si la alerta está activa |
-| `fecha_creacion` | datetime | Fecha de creación |
-
-### Tabla: `ct_alertas_log`
-
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| `alerta_id` | int | ID de la alerta ejecutada |
-| `fecha_ejecucion` | datetime | Cuándo se ejecutó |
-| `resultado` | nvarchar | Resultado de la ejecución |
+### Tabla: `CT_Alertas_Admin_Emails`
+Para destinatarios de notificaciones de errores:
+```sql
+CREATE TABLE CT_Alertas_Admin_Emails (
+    adm_id INT IDENTITY PRIMARY KEY,
+    adm_Email VARCHAR(100),
+    adm_Nombre VARCHAR(50),
+    adm_Activo BIT DEFAULT 1
+);
+```
 
 ## ⚙️ Configuración
 
-1. **Instalar dependencia adicional**:
-   ```bash
-   pip install python-dotenv
-   ```
+### 1. Variables de Entorno
+Copia `.env.example` a `.env` y configura:
+```env
+# Base de Datos
+DB_SERVER=tu_servidor
+DB_DATABASE=tu_base_datos
+DB_USER=tu_usuario
+DB_PASSWORD=tu_contraseña
 
-2. **Crear archivo de configuración**:
-   Copia `.env.example` a `.env` y edita las credenciales:
-   ```bash
-   copy .env.example .env
-   ```
-
-3. **Configurar credenciales** en el archivo `.env`:
-   ```env
-   DB_DRIVER=ODBC Driver 17 for SQL Server
-   DB_SERVER=tu_servidor
-   DB_DATABASE=tu_base_datos
-   DB_USER=tu_usuario
-   DB_PASSWORD=tu_contraseña
-   ```
-
-## 🎯 Uso
-
-1. **Activar entorno virtual**:
-   ```bash
-   .\venv\Scripts\Activate.ps1
-   ```
-
-2. **Ejecutar el scheduler**:
-   ```bash
-   python scheduler.py
-   ```
-
-3. **Detener el scheduler**:
-   Presiona `Ctrl+C`
-
-## 📺 Ejemplo de Salida
-
-```
-🚀 INICIANDO SCHEDULER DE ALERTAS
-💫 Conectado a la base de datos
-⚡ Programador automático activado
-
-============================================================
-📋 CARGANDO ALERTAS DESDE LA BASE DE DATOS
-============================================================
-
-🔍 Revisando Alerta #1:
-   📅 Frecuencia: SEMANAL
-   ⏰ Hora: 09:00:00
-   📆 Días: 1,2,3,4,5
-   ✅ PROGRAMADA - Cada Lunes, Martes, Miércoles, Jueves, Viernes a las 09:00
-
-🔍 Revisando Alerta #2:
-   📅 Frecuencia: MENSUAL
-   ⏰ Hora: 08:00:00
-   📆 Días del mes: 1,15
-   ✅ PROGRAMADA - Días 1, 15 de cada mes a las 08:00
-
-🔍 Revisando Alerta #3:
-   📅 Frecuencia: ANUAL
-   ⏰ Hora: 10:00:00
-   📆 Días del mes: 1
-   ✅ PROGRAMADA - Días 1 de enero cada año a las 10:00
-
-============================================================
-📊 RESUMEN:
-   ✅ Alertas programadas: 3
-   ⚠️  Alertas omitidas: 0
-   📝 Total procesadas: 3
-============================================================
-
-🔄 MODO MONITOREO ACTIVADO
-   El sistema revisa nuevas alertas cada minuto...
-   Presiona Ctrl+C para detener
+# SMTP (para notificaciones de errores)
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=tu_email@gmail.com
+SMTP_PASSWORD=tu_app_password
 ```
 
-## 🔔 Ejecución de Alertas
-
-Cuando se ejecuta una alerta, verás:
-
-```
-🔔 [14:30:15] EJECUTANDO ALERTA #1
-   📡 Enviando webhook a: https://api.constec.ar/webhook/123
-   ✅ Webhook enviado exitosamente (Código: 200)
-   📝 Resultado guardado en el log
-   ✅ Alerta completada
+### 2. Instalar Dependencias
+```bash
+pip install -r requirements.txt
 ```
 
-## 📅 Formato de Días de la Semana
+### 3. Configurar Destinatarios de Errores
+```sql
+INSERT INTO CT_Alertas_Admin_Emails (adm_Email, adm_Nombre) VALUES
+('admin@empresa.com', 'Administrador'),
+('soporte@empresa.com', 'Equipo Soporte');
+```
 
-El campo `dias_semana` usa el formato:
-- `1` = Lunes
-- `2` = Martes  
-- `3` = Miércoles
-- `4` = Jueves
-- `5` = Viernes
-- `6` = Sábado
-- `7` = Domingo
+## 🚀 Uso
 
-**Ejemplo**: `1,2,3,4,5` = Lunes a Viernes
+```bash
+python scheduler.py
+```
 
-## � Formato de Días del Mes
+## 📊 Flujo de Ejecución
 
-El campo `dias_mes` usa números separados por comas:
-- `1` = Día 1 del mes
-- `15` = Día 15 del mes  
-- `1,15,30` = Días 1, 15 y 30 del mes
+1. **Sincronización**: Se alinea al próximo minuto exacto
+2. **Consulta**: `SELECT * FROM VW_Scheduler_Alertas`
+3. **Filtros por alerta**:
+   - ⏱️ Ventana de ±2 minutos de la hora configurada
+   - 📅 Día válido según frecuencia (DIARIO/SEMANAL/MENSUAL)
+   - 🔁 No enviada hoy (consulta `CT_Alertas_Mensajes`)
+4. **Envío**: Si pasa filtros → INSERT BD → POST webhook → UPDATE estado
+5. **Notificación**: Si hay errores → Email HTML a administradores
 
-**Ejemplo**: Para alertas mensuales el día 1 y 15: `1,15`
+## 📋 Logging
 
-## �🔍 Monitoreo Automático
+```
+⏰ [14:25:00] Consultando alertas...
+📊 Encontradas 5 alertas en total
+🔍 Evaluando alerta 000001...
+⏱️ Alerta 000002 fuera de ventana
+📅 Alerta 000003 no aplica hoy
+🔁 Alerta 000004 ya enviada hoy
+✉️ Enviando alerta 000001...
+✅ Alerta 000001 enviada
+📬 Total enviadas: 1 | Errores: 0
+```
 
-- El sistema revisa **cada minuto** si hay nuevas alertas
-- Cuando detecta cambios, **recarga automáticamente** la configuración
-- La pantalla se **limpia y actualiza** mostrando solo información fresca
+## 🔧 Arquitectura
 
-## ⚠️ Validaciones
-
-El sistema automáticamente omite alertas que:
-- No tienen `hora_envio` definida
-- No tienen `frecuencia` definida  
-- Alertas SEMANALES sin `dias_semana`
-- Alertas MENSUALES/ANUALES sin `dias_mes`
-- Tienen formato de hora inválido
-
-## �️ Crear Tabla de Logs
-
-Ejecuta el archivo `create_log_table.sql` en tu base de datos para crear la tabla de logs necesaria.
+- **Stateless**: Sin caché ni estado entre iteraciones
+- **Vista SQL simple**: Solo `WHERE activo=1` (sin filtros complejos)
+- **Filtros en Python**: Lógica flexible sin impacto en BD
+- **Manejo de errores**: Tipificado y sin interrumpir procesamiento
+- **Notificaciones HTML**: Emails visuales con detalles de errores

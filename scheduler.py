@@ -1,102 +1,520 @@
 """
-Scheduler de Alertas - Punto de entrada principal.
+Scheduler de Alertas - Arquitectura de Polling con Filtros en Python
 
-Este script orquesta el sistema de alertas programadas, conectando los diferentes
-módulos para configurar, programar y ejecutar alertas automáticamente.
+Este scheduler implementa una arquitectura stateless que:
+1. Se sincroniza al minuto exacto (segundo 00)
+2. Consulta la vista VW_Scheduler_Alertas (sin filtros)
+3. Aplica 3 filtros en Python: ventana de hora, frecuencia, anti-duplicados
+4. Por cada alerta que pasa los filtros, registra en CT_Alertas_Mensajes y envía webhook
+5. Acumula errores y envía notificaciones por email
 
-Módulos utilizados:
-- database_config: Configuración y conexión a la base de datos
-- webhook_sender: Envío de webhooks y registro de resultados
-- alert_scheduler: Programación de alertas con diferentes frecuencias
-- alert_loader: Carga y monitoreo de alertas desde la base de datos
+Cada ejecución es completamente independiente.
 """
 
 import time
-import os
-from datetime import datetime
-
+import logging
+import uuid
+import traceback
+from datetime import datetime, timedelta
+import pyodbc
 from database_config import DatabaseConfig
 from webhook_sender import WebhookSender
-from alert_scheduler import AlertScheduler
-from alert_loader import AlertLoader
+from email_notifier import EmailNotifier
 
 
-def limpiar_pantalla():
-    """Limpia la pantalla de la consola."""
-    os.system('cls' if os.name == 'nt' else 'clear')
+# Configurar logging con formato personalizado
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
-def inicializar_sistema():
-    """
-    Inicializa todos los componentes del sistema de alertas.
+class AlertScheduler:
+    """Scheduler de alertas con filtros en Python y notificaciones por email."""
     
-    Returns:
-        tuple: (db_config, webhook_sender, alert_scheduler, alert_loader)
-    """
-    print("🚀 INICIANDO SCHEDULER DE ALERTAS")
+    def __init__(self):
+        """Inicializa el scheduler con los componentes necesarios."""
+        self.db_config = DatabaseConfig()
+        self.webhook_sender = WebhookSender()
+        self.email_notifier = EmailNotifier(self.db_config)
+        
+    def generar_msg_cod(self):
+        """
+        Genera un código único para el mensaje.
+        
+        Returns:
+            str: Código único de 6 caracteres
+        """
+        timestamp = str(int(time.time()))[-4:]
+        uuid_part = str(uuid.uuid4()).replace('-', '')[:2].upper()
+        return f"{timestamp}{uuid_part}"
     
-    # Configurar conexión a base de datos
-    try:
-        db_config = DatabaseConfig()
-        conn = db_config.connect()
-        print("💫 Conectado a la base de datos")
-    except Exception as e:
-        print(f"❌ Error al conectar con la base de datos: {e}")
-        exit(1)
+    def calcular_segundos_hasta_proximo_minuto(self):
+        """
+        Calcula cuántos segundos faltan para el próximo minuto exacto.
+        
+        Returns:
+            float: Segundos hasta el próximo minuto (incluyendo microsegundos)
+        """
+        ahora = datetime.now()
+        proximo_minuto = (ahora + timedelta(minutes=1)).replace(second=0, microsecond=0)
+        delta = proximo_minuto - ahora
+        return delta.total_seconds()
     
-    # Inicializar componentes
-    webhook_sender = WebhookSender(conn)
-    alert_scheduler = AlertScheduler(webhook_sender)
-    alert_loader = AlertLoader(conn, alert_scheduler)
+    def sincronizar_al_proximo_minuto(self):
+        """Espera hasta el próximo minuto exacto antes de continuar."""
+        segundos_espera = self.calcular_segundos_hasta_proximo_minuto()
+        logger.info(f"🚀 Scheduler iniciado - sincronizando al próximo minuto...")
+        logger.info(f"⏳ Esperando {segundos_espera:.1f} segundos...")
+        time.sleep(segundos_espera)
     
-    # Iniciar scheduler
-    alert_scheduler.iniciar()
-    print("⚡ Programador automático activado")
+    def consultar_todas_las_alertas(self):
+        """
+        Consulta TODAS las alertas activas desde la vista (sin filtros).
+        
+        Returns:
+            list: Lista de diccionarios con datos de alertas o None si error
+        """
+        try:
+            conn = self.db_config.connect()
+            cursor = conn.cursor()
+            
+            query = """
+            SELECT 
+                config_id, tipo_disparo, frecuencia, hora_envio, dias_semana, dias_mes,
+                tipo_codigo, tipo_descripcion, empresa_codigo, empresa_nombre, empresa_conexion,
+                persona_codigo, persona_nombre, canal_codigo, canal_nombre, 
+                webhook_url, webhook_nombre
+            FROM VW_Scheduler_Alertas
+            """
+            
+            cursor.execute(query)
+            columnas = [description[0] for description in cursor.description]
+            
+            alertas = []
+            for fila in cursor.fetchall():
+                alerta = dict(zip(columnas, fila))
+                alertas.append(alerta)
+            
+            cursor.close()
+            conn.close()
+            return alertas
+            
+        except Exception as e:
+            # Error crítico - retornar None para que se capture en el ciclo principal
+            raise Exception(f"Error al consultar vista VW_Scheduler_Alertas: {e}")
     
-    return db_config, webhook_sender, alert_scheduler, alert_loader
-
-
-def ejecutar_ciclo_principal(alert_loader):
-    """
-    Ejecuta el ciclo principal de monitoreo del sistema.
+    def filtro_ventana_hora(self, alerta, errores_ciclo):
+        """
+        FILTRO A: Verifica si la alerta está en la ventana de ±2 minutos.
+        
+        Args:
+            alerta (dict): Datos de la alerta
+            errores_ciclo (list): Lista para agregar errores
+            
+        Returns:
+            bool: True si pasa el filtro, False si no
+        """
+        try:
+            hora_actual = datetime.now().time()
+            hora_alerta = alerta['hora_envio']
+            
+            if not hora_alerta:
+                errores_ciclo.append({
+                    'timestamp': datetime.now(),
+                    'tipo_error': 'FILTRADO',
+                    'config_id': alerta['config_id'],
+                    'mensaje': 'hora_envio es NULL',
+                    'stack_trace': 'N/A',
+                    'datos_alerta': alerta
+                })
+                return False
+            
+            # Convertir a minutos para facilitar cálculo
+            minutos_actual = hora_actual.hour * 60 + hora_actual.minute
+            minutos_alerta = hora_alerta.hour * 60 + hora_alerta.minute
+            
+            diferencia = abs(minutos_actual - minutos_alerta)
+            
+            # Manejar caso de cambio de día (23:59 vs 00:01)
+            diferencia = min(diferencia, 1440 - diferencia)  # 1440 = minutos en un día
+            
+            return diferencia <= 2
+            
+        except Exception as e:
+            errores_ciclo.append({
+                'timestamp': datetime.now(),
+                'tipo_error': 'FILTRADO',
+                'config_id': alerta.get('config_id', 'UNKNOWN'),
+                'mensaje': f'Error al validar ventana de hora: {str(e)}',
+                'stack_trace': traceback.format_exc(),
+                'datos_alerta': alerta
+            })
+            return False
     
-    Args:
-        alert_loader: Instancia de AlertLoader para verificar cambios
-    """
-    print("\n🔄 MODO MONITOREO ACTIVADO")
-    print("   El sistema revisa nuevas alertas cada minuto...")
-    print("   Presiona Ctrl+C para detener\n")
+    def filtro_frecuencia(self, alerta, errores_ciclo):
+        """
+        FILTRO B: Verifica si la alerta debe ejecutarse según su frecuencia.
+        
+        Args:
+            alerta (dict): Datos de la alerta
+            errores_ciclo (list): Lista para agregar errores
+            
+        Returns:
+            bool: True si pasa el filtro, False si no
+        """
+        try:
+            frecuencia = alerta.get('frecuencia', '').upper()
+            hoy = datetime.now()
+            
+            if frecuencia == 'DIARIO':
+                return True
+            
+            elif frecuencia == 'SEMANAL':
+                dias_semana = alerta.get('dias_semana', '')
+                if not dias_semana:
+                    errores_ciclo.append({
+                        'timestamp': datetime.now(),
+                        'tipo_error': 'FILTRADO',
+                        'config_id': alerta['config_id'],
+                        'mensaje': 'dias_semana vacío para frecuencia SEMANAL',
+                        'stack_trace': 'N/A',
+                        'datos_alerta': alerta
+                    })
+                    return False
+                
+                # Convertir día de Python a formato SQL Server
+                # Python: 1=Lunes, 2=Martes, ..., 7=Domingo
+                # SQL Server: 1=Domingo, 2=Lunes, ..., 7=Sábado
+                dia_python = hoy.isoweekday()  # 1-7
+                dia_sql_server = 1 if dia_python == 7 else dia_python + 1
+                
+                dias_permitidos = [int(d.strip()) for d in dias_semana.split(',') if d.strip().isdigit()]
+                return dia_sql_server in dias_permitidos
+            
+            elif frecuencia == 'MENSUAL':
+                dias_mes = alerta.get('dias_mes', '')
+                if not dias_mes:
+                    errores_ciclo.append({
+                        'timestamp': datetime.now(),
+                        'tipo_error': 'FILTRADO',
+                        'config_id': alerta['config_id'],
+                        'mensaje': 'dias_mes vacío para frecuencia MENSUAL',
+                        'stack_trace': 'N/A',
+                        'datos_alerta': alerta
+                    })
+                    return False
+                
+                dias_permitidos = [int(d.strip()) for d in dias_mes.split(',') if d.strip().isdigit()]
+                return hoy.day in dias_permitidos
+            
+            else:
+                errores_ciclo.append({
+                    'timestamp': datetime.now(),
+                    'tipo_error': 'FILTRADO',
+                    'config_id': alerta['config_id'],
+                    'mensaje': f'Frecuencia desconocida: {frecuencia}',
+                    'stack_trace': 'N/A',
+                    'datos_alerta': alerta
+                })
+                return False
+                
+        except Exception as e:
+            errores_ciclo.append({
+                'timestamp': datetime.now(),
+                'tipo_error': 'FILTRADO',
+                'config_id': alerta.get('config_id', 'UNKNOWN'),
+                'mensaje': f'Error al validar frecuencia: {str(e)}',
+                'stack_trace': traceback.format_exc(),
+                'datos_alerta': alerta
+            })
+            return False
     
-    try:
-        while True:
-            alert_loader.verificar_cambios()
-            time.sleep(60)  # Esperar 1 minuto antes de la próxima verificación
-    except KeyboardInterrupt:
-        print("\n\n� SCHEDULER DETENIDO")
-        print("   ¡Hasta luego!")
+    def filtro_anti_duplicados(self, alerta, errores_ciclo):
+        """
+        FILTRO C: Verifica que la alerta no se haya enviado hoy.
+        
+        Args:
+            alerta (dict): Datos de la alerta
+            errores_ciclo (list): Lista para agregar errores
+            
+        Returns:
+            bool: True si pasa el filtro (no enviada hoy), False si ya fue enviada
+        """
+        try:
+            conn = self.db_config.connect()
+            cursor = conn.cursor()
+            
+            query = """
+            SELECT COUNT(*) 
+            FROM CT_Alertas_Mensajes 
+            WHERE msgcfg_Cod = ? AND CAST(msg_FechaEnvio AS DATE) = CAST(GETDATE() AS DATE)
+            """
+            
+            cursor.execute(query, alerta['config_id'])
+            count = cursor.fetchone()[0]
+            
+            cursor.close()
+            conn.close()
+            
+            return count == 0  # True si no hay registros (no enviada hoy)
+            
+        except Exception as e:
+            errores_ciclo.append({
+                'timestamp': datetime.now(),
+                'tipo_error': 'ANTI_DUPLICADO',
+                'config_id': alerta.get('config_id', 'UNKNOWN'),
+                'mensaje': f'Error al verificar duplicados: {str(e)}',
+                'stack_trace': traceback.format_exc(),
+                'datos_alerta': alerta
+            })
+            # En caso de error, SKIP la alerta por seguridad
+            return False
+    
+    def registrar_mensaje_en_bd(self, msg_cod, config_id, errores_ciclo):
+        """
+        Registra el mensaje en la tabla CT_Alertas_Mensajes con estado PENDIENTE.
+        
+        Args:
+            msg_cod (str): Código único del mensaje
+            config_id (str): ID de configuración de la alerta
+            errores_ciclo (list): Lista para agregar errores
+            
+        Returns:
+            bool: True si se registró correctamente, False en caso contrario
+        """
+        try:
+            conn = self.db_config.connect()
+            cursor = conn.cursor()
+            
+            query = """
+            INSERT INTO CT_Alertas_Mensajes 
+            (msg_Cod, msgcfg_Cod, msg_Estado, msg_FechaEnvio)
+            VALUES (?, ?, 'PENDIENTE', GETDATE())
+            """
+            
+            cursor.execute(query, msg_cod, config_id)
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return True
+            
+        except Exception as e:
+            errores_ciclo.append({
+                'timestamp': datetime.now(),
+                'tipo_error': 'DB_INSERT',
+                'config_id': config_id,
+                'mensaje': f'Error al insertar mensaje: {str(e)}',
+                'stack_trace': traceback.format_exc(),
+                'datos_alerta': {'msg_cod': msg_cod, 'config_id': config_id}
+            })
+            return False
+    
+    def actualizar_estado_mensaje(self, msg_cod, nuevo_estado, errores_ciclo):
+        """
+        Actualiza el estado de un mensaje en la BD.
+        
+        Args:
+            msg_cod (str): Código del mensaje
+            nuevo_estado (str): Nuevo estado (ENVIADO o ERROR)
+            errores_ciclo (list): Lista para agregar errores
+        """
+        try:
+            conn = self.db_config.connect()
+            cursor = conn.cursor()
+            
+            query = """
+            UPDATE CT_Alertas_Mensajes 
+            SET msg_Estado = ?, msg_FechaRespuesta = GETDATE()
+            WHERE msg_Cod = ?
+            """
+            
+            cursor.execute(query, nuevo_estado, msg_cod)
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+        except Exception as e:
+            errores_ciclo.append({
+                'timestamp': datetime.now(),
+                'tipo_error': 'DB_INSERT',
+                'config_id': 'UNKNOWN',
+                'mensaje': f'Error al actualizar estado mensaje {msg_cod}: {str(e)}',
+                'stack_trace': traceback.format_exc(),
+                'datos_alerta': {'msg_cod': msg_cod, 'nuevo_estado': nuevo_estado}
+            })
+    
+    def procesar_alerta(self, alerta, errores_ciclo, resumen):
+        """
+        Procesa una alerta individual: registra en BD y envía webhook.
+        
+        Args:
+            alerta (dict): Datos de la alerta desde la vista
+            errores_ciclo (list): Lista para agregar errores
+            resumen (dict): Diccionario de contadores
+        """
+        config_id = alerta['config_id']
+        webhook_url = alerta['webhook_url']
+        
+        # Generar código único para el mensaje
+        msg_cod = self.generar_msg_cod()
+        
+        # 1. Registrar PRIMERO en la BD para evitar duplicados
+        if not self.registrar_mensaje_en_bd(msg_cod, config_id, errores_ciclo):
+            logger.error(f"❌ No se pudo registrar mensaje para alerta {config_id}")
+            return
+        
+        # 2. Preparar payload JSON con todos los campos
+        payload = {
+            "config_id": alerta['config_id'],
+            "tipo_codigo": alerta['tipo_codigo'],
+            "empresa_codigo": alerta['empresa_codigo'],
+            "empresa_conexion": alerta['empresa_conexion'],
+            "persona_codigo": alerta['persona_codigo'],
+            "canal_codigo": alerta['canal_codigo']
+        }
+        
+        # 3. Enviar webhook
+        logger.info(f"✉️ Enviando alerta {config_id}...")
+        
+        exito, error_msg = self.webhook_sender.enviar_webhook(webhook_url, payload)
+        
+        # 4. Actualizar estado según resultado
+        if exito:
+            self.actualizar_estado_mensaje(msg_cod, 'ENVIADO', errores_ciclo)
+            logger.info(f"✅ Alerta {config_id} enviada")
+            resumen['alertas_enviadas'] += 1
+        else:
+            self.actualizar_estado_mensaje(msg_cod, 'ERROR', errores_ciclo)
+            logger.error(f"❌ Error en alerta {config_id}: {error_msg}")
+            
+            # Agregar error de webhook a la lista
+            errores_ciclo.append({
+                'timestamp': datetime.now(),
+                'tipo_error': 'WEBHOOK',
+                'config_id': config_id,
+                'mensaje': error_msg,
+                'stack_trace': 'N/A',
+                'datos_alerta': alerta
+            })
+    
+    def ejecutar_ciclo(self):
+        """Ejecuta un ciclo completo de polling con filtros y manejo de errores."""
+        # Inicializar estructuras de datos del ciclo
+        errores_ciclo = []
+        resumen = {
+            'timestamp_inicio': datetime.now(),
+            'timestamp_fin': None,
+            'total_alertas': 0,
+            'alertas_enviadas': 0,
+            'alertas_skip_hora': 0,
+            'alertas_skip_dia': 0,
+            'alertas_skip_duplicado': 0,
+            'total_errores': 0
+        }
+        
+        try:
+            # Mostrar inicio del ciclo
+            timestamp_actual = datetime.now().strftime('%H:%M:%S')
+            logger.info(f"⏰ [{timestamp_actual}] Consultando alertas...")
+            
+            # Consultar TODAS las alertas activas (sin filtros)
+            alertas = self.consultar_todas_las_alertas()
+            resumen['total_alertas'] = len(alertas)
+            logger.info(f"📊 Encontradas {len(alertas)} alertas en total")
+            
+            # Procesar cada alerta con los 3 filtros
+            for alerta in alertas:
+                config_id = alerta['config_id']
+                logger.info(f"� Evaluando alerta {config_id}...")
+                
+                # FILTRO A: Ventana de hora (±2 minutos)
+                if not self.filtro_ventana_hora(alerta, errores_ciclo):
+                    logger.info(f"⏱️ Alerta {config_id} fuera de ventana")
+                    resumen['alertas_skip_hora'] += 1
+                    continue
+                
+                # FILTRO B: Frecuencia (día de la semana/mes)
+                if not self.filtro_frecuencia(alerta, errores_ciclo):
+                    logger.info(f"� Alerta {config_id} no aplica hoy")
+                    resumen['alertas_skip_dia'] += 1
+                    continue
+                
+                # FILTRO C: Anti-duplicados
+                if not self.filtro_anti_duplicados(alerta, errores_ciclo):
+                    logger.info(f"🔁 Alerta {config_id} ya enviada hoy")
+                    resumen['alertas_skip_duplicado'] += 1
+                    continue
+                
+                # Si llegó hasta acá, procesar la alerta
+                self.procesar_alerta(alerta, errores_ciclo, resumen)
+            
+        except Exception as e:
+            # Error crítico en consulta de BD
+            errores_ciclo.append({
+                'timestamp': datetime.now(),
+                'tipo_error': 'BD_QUERY',
+                'config_id': 'N/A',
+                'mensaje': f'Error crítico al consultar alertas: {str(e)}',
+                'stack_trace': traceback.format_exc(),
+                'datos_alerta': None
+            })
+            logger.error(f"❌ Error crítico al consultar alertas: {e}")
+        
+        finally:
+            # Finalizar resumen
+            resumen['timestamp_fin'] = datetime.now()
+            resumen['total_errores'] = len(errores_ciclo)
+            
+            # Mostrar resumen en consola
+            logger.info(f"📬 Total enviadas: {resumen['alertas_enviadas']} | Errores: {resumen['total_errores']}")
+            
+            # Enviar notificación por email si hay errores
+            if errores_ciclo:
+                try:
+                    self.email_notifier.enviar_notificacion_errores(errores_ciclo, resumen)
+                except Exception as e:
+                    logger.error(f"❌ Error al enviar notificación por email: {e}")
+    
+    def ejecutar(self):
+        """
+        Ejecuta el scheduler principal con polling cada minuto.
+        Se sincroniza primero al minuto exacto y mantiene esa sincronización.
+        """
+        # Sincronizar al próximo minuto antes de empezar
+        self.sincronizar_al_proximo_minuto()
+        
+        logger.info("🔄 Scheduler activo - ejecutando cada minuto exacto")
+        logger.info("Presiona Ctrl+C para detener\n")
+        
+        try:
+            while True:
+                # Ejecutar ciclo de polling
+                self.ejecutar_ciclo()
+                
+                # Calcular tiempo hasta el próximo minuto
+                segundos_espera = self.calcular_segundos_hasta_proximo_minuto()
+                logger.info(f"⏳ Esperando hasta el próximo minuto... ({segundos_espera:.1f}s)")
+                
+                # Esperar hasta el próximo minuto exacto
+                time.sleep(segundos_espera)
+                
+        except KeyboardInterrupt:
+            logger.info("\n🛑 Scheduler detenido por el usuario")
+        except Exception as e:
+            logger.error(f"❌ Error crítico en el scheduler: {e}")
+            raise
 
 
 def main():
-    """Función principal que orquesta todo el sistema."""
-    # Limpiar pantalla al inicio
-    limpiar_pantalla()
-    
-    # Inicializar sistema
-    db_config, webhook_sender, alert_scheduler, alert_loader = inicializar_sistema()
-    
+    """Función principal que inicia el scheduler."""
     try:
-        # Cargar alertas iniciales
-        alert_loader.cargar_alertas()
-        
-        # Ejecutar ciclo principal de monitoreo
-        ejecutar_ciclo_principal(alert_loader)
-        
+        scheduler = AlertScheduler()
+        scheduler.ejecutar()
     except Exception as e:
-        print(f"❌ Error crítico en el sistema: {e}")
-    finally:
-        # Limpiar recursos
-        alert_scheduler.detener()
-        db_config.close_connection()
+        logger.error(f"❌ Error al inicializar el scheduler: {e}")
 
 
 if __name__ == "__main__":

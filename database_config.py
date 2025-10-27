@@ -1,6 +1,6 @@
 """
 Módulo de configuración y conexión a la base de datos.
-Maneja las credenciales, validación de variables de entorno y conexión a SQL Server.
+Maneja las credenciales y conexión a SQL Server de forma simple.
 """
 
 import os
@@ -15,7 +15,6 @@ class DatabaseConfig:
         """Inicializa la configuración cargando variables de entorno."""
         load_dotenv()
         self._validate_environment_variables()
-        self._connection = None
     
     def _validate_environment_variables(self):
         """Valida que todas las variables de entorno requeridas estén presentes."""
@@ -29,10 +28,6 @@ class DatabaseConfig:
         missing_vars = [var for var in required_vars if not os.getenv(var)]
         
         if missing_vars:
-            print("❌ ERROR: Faltan variables de entorno en el archivo .env:")
-            for var in missing_vars:
-                print(f"   - {var}")
-            print("\n💡 Crea un archivo .env con las credenciales de la base de datos")
             raise ValueError(f"Variables de entorno faltantes: {missing_vars}")
     
     def get_connection_string(self):
@@ -46,23 +41,11 @@ class DatabaseConfig:
         )
     
     def connect(self):
-        """Establece conexión con la base de datos."""
-        try:
-            connection_string = self.get_connection_string()
-            self._connection = pyodbc.connect(connection_string)
-            return self._connection
-        except Exception as e:
-            print(f"❌ Error al conectar con la base de datos: {e}")
-            raise
-    
-    def get_connection(self):
-        """Obtiene la conexión activa o crea una nueva si no existe."""
-        if self._connection is None:
-            self.connect()
-        return self._connection
-    
-    def close_connection(self):
-        """Cierra la conexión a la base de datos."""
-        if self._connection:
-            self._connection.close()
-            self._connection = None
+        """
+        Establece una nueva conexión con la base de datos.
+        
+        Returns:
+            pyodbc.Connection: Nueva conexión a la base de datos
+        """
+        connection_string = self.get_connection_string()
+        return pyodbc.connect(connection_string)
