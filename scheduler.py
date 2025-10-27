@@ -23,10 +23,24 @@ from email_notifier import EmailNotifier
 
 
 # Configurar logging con formato personalizado
+import os
+from datetime import datetime
+
+# Crear directorio de logs si no existe
+logs_dir = os.path.join(os.path.dirname(__file__), 'logs')
+os.makedirs(logs_dir, exist_ok=True)
+
+# Configurar logging tanto a consola como a archivo
+log_filename = os.path.join(logs_dir, f'scheduler_{datetime.now().strftime("%Y%m%d")}.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
-    datefmt='%H:%M:%S'
+    datefmt='%H:%M:%S',
+    handlers=[
+        logging.StreamHandler(),  # Consola
+        logging.FileHandler(log_filename, encoding='utf-8')  # Archivo
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -291,8 +305,8 @@ class AlertScheduler:
             
             query = """
             INSERT INTO CT_Alertas_Mensajes 
-            (msg_Cod, msgcfg_Cod, msg_Estado, msg_FechaEnvio)
-            VALUES (?, ?, 'PENDIENTE', GETDATE())
+            (msg_Cod, msg_Wamid, msgcfg_Cod, msgbej_Tel, msg_Estado)
+            VALUES (?, '', ?, '', 'PENDIENTE')
             """
             
             cursor.execute(query, msg_cod, config_id)
@@ -302,14 +316,16 @@ class AlertScheduler:
             return True
             
         except Exception as e:
+            error_msg = f'Error al insertar mensaje en CT_Alertas_Mensajes: {str(e)}'
             errores_ciclo.append({
                 'timestamp': datetime.now(),
                 'tipo_error': 'DB_INSERT',
                 'config_id': config_id,
-                'mensaje': f'Error al insertar mensaje: {str(e)}',
+                'mensaje': error_msg,
                 'stack_trace': traceback.format_exc(),
-                'datos_alerta': {'msg_cod': msg_cod, 'config_id': config_id}
+                'datos_alerta': {'msg_cod': msg_cod, 'config_id': config_id, 'tabla': 'CT_Alertas_Mensajes'}
             })
+            logger.error(f"❌ {error_msg}")
             return False
     
     def actualizar_estado_mensaje(self, msg_cod, nuevo_estado, errores_ciclo):
@@ -337,14 +353,16 @@ class AlertScheduler:
             conn.close()
             
         except Exception as e:
+            error_msg = f'Error al actualizar estado en CT_Alertas_Mensajes: {str(e)}'
             errores_ciclo.append({
                 'timestamp': datetime.now(),
                 'tipo_error': 'DB_INSERT',
                 'config_id': 'UNKNOWN',
-                'mensaje': f'Error al actualizar estado mensaje {msg_cod}: {str(e)}',
+                'mensaje': error_msg,
                 'stack_trace': traceback.format_exc(),
-                'datos_alerta': {'msg_cod': msg_cod, 'nuevo_estado': nuevo_estado}
+                'datos_alerta': {'msg_cod': msg_cod, 'nuevo_estado': nuevo_estado, 'tabla': 'CT_Alertas_Mensajes', 'operacion': 'UPDATE'}
             })
+            logger.error(f"❌ {error_msg}")
     
     def procesar_alerta(self, alerta, errores_ciclo, resumen):
         """
@@ -399,6 +417,36 @@ class AlertScheduler:
                 'stack_trace': 'N/A',
                 'datos_alerta': alerta
             })
+    
+    def generar_reporte_html_local(self, errores_ciclo, resumen):
+        """
+        Genera un reporte HTML local de errores.
+        
+        Args:
+            errores_ciclo (list): Lista de errores del ciclo
+            resumen (dict): Resumen de ejecución
+        """
+        try:
+            # Crear directorio de reportes si no existe
+            reportes_dir = os.path.join(os.path.dirname(__file__), 'reportes')
+            os.makedirs(reportes_dir, exist_ok=True)
+            
+            # Generar nombre del archivo
+            timestamp = resumen['timestamp_inicio'].strftime('%Y%m%d_%H%M%S')
+            filename = f'reporte_errores_{timestamp}.html'
+            filepath = os.path.join(reportes_dir, filename)
+            
+            # Generar HTML usando el email_notifier
+            html_content = self.email_notifier.generar_html_errores(errores_ciclo, resumen)
+            
+            # Guardar archivo
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            logger.info(f"📄 Reporte HTML guardado: {filename}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error al generar reporte HTML local: {e}")
     
     def ejecutar_ciclo(self):
         """Ejecuta un ciclo completo de polling con filtros y manejo de errores."""
@@ -471,12 +519,16 @@ class AlertScheduler:
             # Mostrar resumen en consola
             logger.info(f"📬 Total enviadas: {resumen['alertas_enviadas']} | Errores: {resumen['total_errores']}")
             
-            # Enviar notificación por email si hay errores
+            # Generar reporte HTML local y enviar email si hay errores
             if errores_ciclo:
                 try:
+                    # Generar y guardar reporte HTML local
+                    self.generar_reporte_html_local(errores_ciclo, resumen)
+                    
+                    # Enviar notificación por email
                     self.email_notifier.enviar_notificacion_errores(errores_ciclo, resumen)
                 except Exception as e:
-                    logger.error(f"❌ Error al enviar notificación por email: {e}")
+                    logger.error(f"❌ Error al procesar errores: {e}")
     
     def ejecutar(self):
         """

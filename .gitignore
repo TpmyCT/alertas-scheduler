@@ -7,6 +7,10 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Logs y reportes generados
+logs/
+reportes/
+
 # Archivos de VS Code
 .vscode/
 
