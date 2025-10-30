@@ -199,15 +199,12 @@ class AlertScheduler:
                     })
                     return False
                 
-                # Convertir día de Python a formato SQL Server
-                # Python: 1=Lunes, 2=Martes, ..., 7=Domingo
-                # SQL Server: 1=Domingo, 2=Lunes, ..., 7=Sábado
-                dia_python = hoy.isoweekday()  # 1-7
-                dia_sql_server = 1 if dia_python == 7 else dia_python + 1
+                # Usar directamente isoweekday() (1=Lun, 2=Mar... 7=Dom)
+                dia_hoy = hoy.isoweekday()
                 
                 dias_permitidos = [int(d.strip()) for d in dias_semana.split(',') if d.strip().isdigit()]
-                return dia_sql_server in dias_permitidos
-            
+                return dia_hoy in dias_permitidos
+
             elif frecuencia == 'MENSUAL':
                 dias_mes = alerta.get('dias_mes', '')
                 if not dias_mes:
@@ -287,43 +284,42 @@ class AlertScheduler:
             # En caso de error, SKIP la alerta por seguridad
             return False
     
-    def registrar_mensaje_en_bd(self, msg_cod, config_id, errores_ciclo):
+    def registrar_mensaje_en_bd(self, sch_cod, config_id, errores_ciclo, payload_json=None, cant_mensajes=None):
         """
-        Registra el mensaje en la tabla CT_Alertas_Mensajes con estado PENDIENTE.
+        Registra el intento de envío de alerta en la tabla CT_Scheduler_Alertas con estado PENDIENTE.
         
         Args:
-            msg_cod (str): Código único del mensaje
+            sch_cod (str): Código único del intento
             config_id (str): ID de configuración de la alerta
             errores_ciclo (list): Lista para agregar errores
-            
+            payload_json (str): JSON enviado al webhook (opcional)
+            cant_mensajes (int): Cantidad de mensajes enviados (opcional)
         Returns:
             bool: True si se registró correctamente, False en caso contrario
         """
         try:
             conn = self.db_config.connect()
             cursor = conn.cursor()
-            
+            hoy = datetime.now().date()
             query = """
-            INSERT INTO CT_Alertas_Mensajes 
-            (msg_Cod, msg_Wamid, msgcfg_Cod, msgbej_Tel, msg_Estado)
-            VALUES (?, '', ?, '', 'PENDIENTE')
+            INSERT INTO CT_Scheduler_Alertas 
+            (sch_Cod, schcfg_Cod, sch_FechaIntento, sch_Fecha, sch_Estado, sch_CantMensajes, sch_DetalleError, sch_PayloadJson, sch_Activo)
+            VALUES (?, ?, GETDATE(), ?, 'ENVIADO', ?, NULL, ?, 1)
             """
-            
-            cursor.execute(query, msg_cod, config_id)
+            cursor.execute(query, sch_cod, config_id, hoy, cant_mensajes, payload_json)
             conn.commit()
             cursor.close()
             conn.close()
             return True
-            
         except Exception as e:
-            error_msg = f'Error al insertar mensaje en CT_Alertas_Mensajes: {str(e)}'
+            error_msg = f'Error al insertar registro en CT_Scheduler_Alertas: {str(e)}'
             errores_ciclo.append({
                 'timestamp': datetime.now(),
                 'tipo_error': 'DB_INSERT',
                 'config_id': config_id,
                 'mensaje': error_msg,
                 'stack_trace': traceback.format_exc(),
-                'datos_alerta': {'msg_cod': msg_cod, 'config_id': config_id, 'tabla': 'CT_Alertas_Mensajes'}
+                'datos_alerta': {'sch_cod': sch_cod, 'config_id': config_id, 'tabla': 'CT_Scheduler_Alertas'}
             })
             logger.error(f"❌ {error_msg}")
             return False
@@ -365,26 +361,37 @@ class AlertScheduler:
             logger.error(f"❌ {error_msg}")
     
     def procesar_alerta(self, alerta, errores_ciclo, resumen):
-        """
-        Procesa una alerta individual: registra en BD y envía webhook.
-        
-        Args:
-            alerta (dict): Datos de la alerta desde la vista
-            errores_ciclo (list): Lista para agregar errores
-            resumen (dict): Diccionario de contadores
-        """
         config_id = alerta['config_id']
         webhook_url = alerta['webhook_url']
         
         # Generar código único para el mensaje
         msg_cod = self.generar_msg_cod()
         
-        # 1. Registrar PRIMERO en la BD para evitar duplicados
+        # 1. Registrar en CT_Scheduler_Alertas
         if not self.registrar_mensaje_en_bd(msg_cod, config_id, errores_ciclo):
-            logger.error(f"❌ No se pudo registrar mensaje para alerta {config_id}")
+            logger.error(f"❌ No se pudo registrar en CT_Scheduler_Alertas para {config_id}")
             return
         
-        # 2. Preparar payload JSON con todos los campos
+        # 2. NUEVO: Insertar en CT_Alertas_Mensajes con estado PENDIENTE
+        try:
+            conn = self.db_config.connect()
+            cursor = conn.cursor()
+            
+            query = """
+            INSERT INTO CT_Alertas_Mensajes 
+            (msg_Cod, msg_Wamid, msgcfg_Cod, msgbej_Tel, msg_FechaEnvio, msg_Estado)
+            VALUES (?, '', ?, '', GETDATE(), 'PENDIENTE')
+            """
+            
+            cursor.execute(query, msg_cod, config_id)
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            logger.error(f"❌ Error al insertar en CT_Alertas_Mensajes: {e}")
+            return
+        
+        # 3. Preparar payload JSON
         payload = {
             "config_id": alerta['config_id'],
             "tipo_codigo": alerta['tipo_codigo'],
@@ -394,12 +401,12 @@ class AlertScheduler:
             "canal_codigo": alerta['canal_codigo']
         }
         
-        # 3. Enviar webhook
+        # 4. Enviar webhook
         logger.info(f"✉️ Enviando alerta {config_id}...")
         
         exito, error_msg = self.webhook_sender.enviar_webhook(webhook_url, payload)
         
-        # 4. Actualizar estado según resultado
+        # 5. Actualizar estado según resultado
         if exito:
             self.actualizar_estado_mensaje(msg_cod, 'ENVIADO', errores_ciclo)
             logger.info(f"✅ Alerta {config_id} enviada")
@@ -408,7 +415,6 @@ class AlertScheduler:
             self.actualizar_estado_mensaje(msg_cod, 'ERROR', errores_ciclo)
             logger.error(f"❌ Error en alerta {config_id}: {error_msg}")
             
-            # Agregar error de webhook a la lista
             errores_ciclo.append({
                 'timestamp': datetime.now(),
                 'tipo_error': 'WEBHOOK',
@@ -450,7 +456,6 @@ class AlertScheduler:
     
     def ejecutar_ciclo(self):
         """Ejecuta un ciclo completo de polling con filtros y manejo de errores."""
-        # Inicializar estructuras de datos del ciclo
         errores_ciclo = []
         resumen = {
             'timestamp_inicio': datetime.now(),
@@ -462,45 +467,30 @@ class AlertScheduler:
             'alertas_skip_duplicado': 0,
             'total_errores': 0
         }
-        
         try:
-            # Mostrar inicio del ciclo
             timestamp_actual = datetime.now().strftime('%H:%M:%S')
             logger.info(f"⏰ [{timestamp_actual}] Consultando alertas...")
-            
-            # Consultar TODAS las alertas activas (sin filtros)
             alertas = self.consultar_todas_las_alertas()
-            resumen['total_alertas'] = len(alertas)
-            logger.info(f"📊 Encontradas {len(alertas)} alertas en total")
-            
-            # Procesar cada alerta con los 3 filtros
+            # Filtrar solo las alertas pendientes para hoy (por frecuencia y anti-duplicado)
+            pendientes_hoy = []
             for alerta in alertas:
-                config_id = alerta['config_id']
-                logger.info(f"� Evaluando alerta {config_id}...")
-                
-                # FILTRO A: Ventana de hora (±2 minutos)
-                if not self.filtro_ventana_hora(alerta, errores_ciclo):
-                    logger.info(f"⏱️ Alerta {config_id} fuera de ventana")
+                if self.filtro_frecuencia(alerta, errores_ciclo) and self.filtro_anti_duplicados(alerta, errores_ciclo):
+                    pendientes_hoy.append(alerta)
+            resumen['total_alertas'] = len(pendientes_hoy)
+            logger.info(f"📊 Pendientes para hoy: {len(pendientes_hoy)}")
+            # Ahora, de las pendientes hoy, solo procesar las que tocan en este minuto
+            procesar_ahora = []
+            for alerta in pendientes_hoy:
+                if self.filtro_ventana_hora(alerta, errores_ciclo):
+                    procesar_ahora.append(alerta)
+                else:
                     resumen['alertas_skip_hora'] += 1
-                    continue
-                
-                # FILTRO B: Frecuencia (día de la semana/mes)
-                if not self.filtro_frecuencia(alerta, errores_ciclo):
-                    logger.info(f"� Alerta {config_id} no aplica hoy")
-                    resumen['alertas_skip_dia'] += 1
-                    continue
-                
-                # FILTRO C: Anti-duplicados
-                if not self.filtro_anti_duplicados(alerta, errores_ciclo):
-                    logger.info(f"🔁 Alerta {config_id} ya enviada hoy")
-                    resumen['alertas_skip_duplicado'] += 1
-                    continue
-                
-                # Si llegó hasta acá, procesar la alerta
+            logger.info(f"⏱️ Alertas a procesar en este minuto: {len(procesar_ahora)}")
+            for alerta in procesar_ahora:
+                config_id = alerta['config_id']
+                logger.info(f"� Procesando alerta {config_id}...")
                 self.procesar_alerta(alerta, errores_ciclo, resumen)
-            
         except Exception as e:
-            # Error crítico en consulta de BD
             errores_ciclo.append({
                 'timestamp': datetime.now(),
                 'tipo_error': 'BD_QUERY',
@@ -510,22 +500,13 @@ class AlertScheduler:
                 'datos_alerta': None
             })
             logger.error(f"❌ Error crítico al consultar alertas: {e}")
-        
         finally:
-            # Finalizar resumen
             resumen['timestamp_fin'] = datetime.now()
             resumen['total_errores'] = len(errores_ciclo)
-            
-            # Mostrar resumen en consola
             logger.info(f"📬 Total enviadas: {resumen['alertas_enviadas']} | Errores: {resumen['total_errores']}")
-            
-            # Generar reporte HTML local y enviar email si hay errores
             if errores_ciclo:
                 try:
-                    # Generar y guardar reporte HTML local
                     self.generar_reporte_html_local(errores_ciclo, resumen)
-                    
-                    # Enviar notificación por email
                     self.email_notifier.enviar_notificacion_errores(errores_ciclo, resumen)
                 except Exception as e:
                     logger.error(f"❌ Error al procesar errores: {e}")
