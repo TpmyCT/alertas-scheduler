@@ -11,6 +11,12 @@ __pycache__/
 logs/
 reportes/
 
+# Archivos de contexto interno (útiles localmente, no en repo)
+AGENT_CONTEXT.md
+TABLAS_ACTUALES.md
+AJUSTES_PENDIENTES.md
+CAMBIOS_APLICADOS.md
+
 # Archivos de VS Code
 .vscode/
 
