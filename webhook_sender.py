@@ -40,6 +40,11 @@ class WebhookSender:
                 timeout=self.timeout
             )
             
+            # Log detallado de la respuesta para diagnóstico
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"📡 Webhook response: {response.status_code} - {response.text[:200]}")
+            
             # Verificar si la respuesta fue exitosa (códigos 2xx)
             response.raise_for_status()
             

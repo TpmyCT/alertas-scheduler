@@ -71,13 +71,16 @@ Tracking de mensajes individuales enviados:
 ```sql
 CREATE TABLE CT_Alertas_Mensajes (
     msg_id INT IDENTITY PRIMARY KEY,
-    msg_Cod VARCHAR(6),
-    msg_Wamid VARCHAR(100),
+    msg_Cod VARCHAR(6) NOT NULL,
+    msg_Wamid VARCHAR(255) NOT NULL,
     msgcfg_Cod VARCHAR(6),
-    msgbej_Tel VARCHAR(50),
-    msg_Estado VARCHAR(20),
-    msg_FechaEnvio DATETIME,
-    msg_FechaRespuesta DATETIME
+    msg_Destinatario VARCHAR(50) NOT NULL,
+    msg_FechaEnvio DATETIME NOT NULL DEFAULT GETDATE(),
+    msg_FechaRespuesta DATETIME,
+    msg_ButtonPayload VARCHAR(100),
+    msg_ButtonText VARCHAR(100),
+    msg_Estado VARCHAR(20) NOT NULL,
+    msgcan_Cod VARCHAR(6) NOT NULL
 );
 ```
 

@@ -88,16 +88,17 @@
 
 ### 6️⃣ CT_Alertas_Mensajes
 
-| msg_Cod | msg_Wamid | msgcfg_Cod | msgbej_Tel | msg_FechaEnvio | msg_FechaRespuesta | msg_ButtonPayload | msg_ButtonText | msg_Estado |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 000001 | wamid.HBgNNTQ5MTE1NzQwNDQxMhUCABIYFjNFQj | 000001 | +5491127849391 | 2025-10-29 09:00:15 | 2025-10-29 09:05:23 | OK | Entendido | ENVIADO |
-| 000002 | wamid.HBgNNTQ5MTE1NzQwNDQxMhUCABIYFjNFQj | 000001 | +5491127849391 | 2025-10-30 09:00:08 | NULL | NULL | NULL | ENVIADO |
-| 000003 | wamid.XYZ789ABC456DEF | 000003 | +5491157123456 | 2025-10-28 10:00:12 | NULL | NULL | NULL | ENVIADO |
-| 000004 | wamid.QWE456RTY789UIO | 000004 | +5491157404412 | 2025-10-15 08:30:05 | NULL | NULL | NULL | ENVIADO |
-| 000005 | wamid.ZXC123VBN456MLK | 000005 | +5491157123456 | 2025-10-20 14:00:00 | NULL | NULL | NULL | PENDIENTE |
-| 000006 | wamid.ERROR789 | 000001 | +5491199999999 | 2025-10-28 09:00:00 | NULL | NULL | NULL | ERROR |
+| msg_Cod | msg_Wamid | msgcfg_Cod | msg_Destinatario | msg_FechaEnvio | msg_FechaRespuesta | msg_ButtonPayload | msg_ButtonText | msg_Estado | msgcan_Cod |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 000001 | wamid.HBgNNTQ5MTE1NzQwNDQxMhUCABIYFjNFQj | 000001 | +5491127849391 | 2025-10-29 09:00:15 | 2025-10-29 09:05:23 | OK | Entendido | ENVIADO | 0001 |
+| 000002 | wamid.HBgNNTQ5MTE1NzQwNDQxMhUCABIYFjNFQj | 000001 | +5491127849391 | 2025-10-30 09:00:08 | NULL | NULL | NULL | ENVIADO | 0001 |
+| 000003 | wamid.XYZ789ABC456DEF | 000003 | +5491157123456 | 2025-10-28 10:00:12 | NULL | NULL | NULL | ENVIADO | 0001 |
+| 000004 |  | 000004 | tjuarez@constec.com.ar | 2025-10-15 08:30:05 | 2025-10-15 08:30:08 | NULL | NULL | ENVIADO | 0002 |
+| 000005 | wamid.ZXC123VBN456MLK | 000005 | +5491157123456 | 2025-10-20 14:00:00 | NULL | NULL | NULL | PENDIENTE | 0001 |
+| 000006 | wamid.ERROR789 | 000001 | +5491199999999 | 2025-10-28 09:00:00 | NULL | NULL | NULL | ERROR | 0001 |
 
-**Estados posibles:** PENDIENTE, ENVIADO, ERROR
+**Estados posibles:** PENDIENTE, ENVIADO, ERROR  
+**Nota:** `msgcan_Cod` indica el canal (0001=WhatsApp, 0002=Email, etc.). `msg_Wamid` está vacío para emails.
 
 ---
 

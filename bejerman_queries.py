@@ -20,16 +20,18 @@ class BejermanQueries:
     
     def obtener_destinatarios_individual(self, emp_conexion, cfgper_cod, cfgcon_cod, cfgcan_cod):
         """
-        Obtiene destinatario para modo INDIVIDUAL.
+        Obtiene destinatarios para modo INDIVIDUAL.
+        - Si cfgcon_cod está especificado: devuelve solo ese contacto
+        - Si cfgcon_cod es NULL: devuelve TODOS los contactos activos de la persona
         
         Args:
             emp_conexion (str): String de conexión a Bejerman (Base64)
             cfgper_cod (str): Código de persona
-            cfgcon_cod (str): Código de contacto específico (o NULL para principal)
+            cfgcon_cod (str): Código de contacto específico (o NULL para todos)
             cfgcan_cod (str): Código de canal (0001=WhatsApp, 0002=Email, 0003=SMS)
             
         Returns:
-            list: Lista con un diccionario de destinatario o lista vacía si error
+            list: Lista de diccionarios con destinatarios
         """
         import logging
         logger = logging.getLogger(__name__)
@@ -38,55 +40,52 @@ class BejermanQueries:
             conn = self.db_config.connect_bejerman(emp_conexion)
             cursor = conn.cursor()
             
-            # Determinar qué campo usar según canal
-            campo_contacto = self._get_campo_contacto_por_canal(cfgcan_cod)
-            
             if cfgcon_cod:
                 # Contacto específico
-                query = f"""
+                query = """
                 SELECT 
                     p.Tper_Cod, p.Tper_Desc,
-                    c.Tcon_Cod, c.Tcon_Desc, c.{campo_contacto} AS contacto,
-                    rpp.Trppbej_Cod
-                FROM TgeCTPersonas p
-                INNER JOIN TgeCTContactos c ON c.Tconper_Cod = p.Tper_Cod
-                LEFT JOIN TgeCTRel_Persona_Perfil rpp ON rpp.Trppper_Cod = p.Tper_Cod
+                    c.Tcon_Cod, c.Tcon_Desc, 
+                    c.Tcon_Email, c.Tcon_Celular,
+                    rpp.Trppbej_Cod,
+                    prf.Tprf_Cod, prf.Tprf_Desc
+                FROM CTPersonas p
+                INNER JOIN CTContactos c ON c.Tconper_Cod = p.Tper_Cod
+                LEFT JOIN CTRel_Persona_Perfil rpp ON rpp.Trppper_Cod = p.Tper_Cod
+                LEFT JOIN CTPerfiles prf ON prf.Tprf_Cod = rpp.Trppprf_Cod
                 WHERE p.Tper_Cod = ? AND c.Tcon_Cod = ? 
                     AND p.Tper_Activo = 1 AND c.Tcon_Activo = 1
-                    AND c.{campo_contacto} IS NOT NULL
                 """
                 cursor.execute(query, cfgper_cod, cfgcon_cod)
             else:
-                # Contacto principal
-                query = f"""
+                # TODOS los contactos activos de la persona
+                query = """
                 SELECT 
                     p.Tper_Cod, p.Tper_Desc,
-                    c.Tcon_Cod, c.Tcon_Desc, c.{campo_contacto} AS contacto,
-                    rpp.Trppbej_Cod
-                FROM TgeCTPersonas p
-                INNER JOIN TgeCTContactos c ON c.Tconper_Cod = p.Tper_Cod
-                LEFT JOIN TgeCTRel_Persona_Perfil rpp ON rpp.Trppper_Cod = p.Tper_Cod
-                WHERE p.Tper_Cod = ? AND c.Tcon_EsPrincipal = 1
+                    c.Tcon_Cod, c.Tcon_Desc, 
+                    c.Tcon_Email, c.Tcon_Celular,
+                    rpp.Trppbej_Cod,
+                    prf.Tprf_Cod, prf.Tprf_Desc
+                FROM CTPersonas p
+                INNER JOIN CTContactos c ON c.Tconper_Cod = p.Tper_Cod
+                LEFT JOIN CTRel_Persona_Perfil rpp ON rpp.Trppper_Cod = p.Tper_Cod
+                LEFT JOIN CTPerfiles prf ON prf.Tprf_Cod = rpp.Trppprf_Cod
+                WHERE p.Tper_Cod = ?
                     AND p.Tper_Activo = 1 AND c.Tcon_Activo = 1
-                    AND c.{campo_contacto} IS NOT NULL
                 """
                 cursor.execute(query, cfgper_cod)
             
-            row = cursor.fetchone()
+            # Obtener nombres de columnas directamente de la BD
+            columnas = [desc[0] for desc in cursor.description]
+            
+            # Construir lista de diccionarios automáticamente
+            destinatarios = []
+            for row in cursor.fetchall():
+                destinatarios.append(dict(zip(columnas, row)))
+            
             cursor.close()
             conn.close()
-            
-            if row:
-                return [{
-                    'persona_cod': row[0],
-                    'persona_desc': row[1],
-                    'contacto_cod': row[2],
-                    'contacto_desc': row[3],
-                    'contacto_valor': row[4],
-                    'bej_cod': row[5]
-                }]
-            
-            return []
+            return destinatarios
             
         except Exception as e:
             logger.error(f"   ❌ Error: {e}")
@@ -95,6 +94,7 @@ class BejermanQueries:
     def obtener_destinatarios_perfil(self, emp_conexion, cfgprf_cod, cfgcan_cod):
         """
         Obtiene todos los destinatarios para modo PERFIL.
+        Devuelve TODOS los contactos activos de cada persona en el perfil.
         
         Args:
             emp_conexion (str): String de conexión a Bejerman (Base64)
@@ -108,37 +108,33 @@ class BejermanQueries:
             conn = self.db_config.connect_bejerman(emp_conexion)
             cursor = conn.cursor()
             
-            # Determinar qué campo usar según canal
-            campo_contacto = self._get_campo_contacto_por_canal(cfgcan_cod)
-            
-            query = f"""
+            # Obtener TODOS los contactos activos de las personas en el perfil
+            query = """
             SELECT DISTINCT
                 p.Tper_Cod, p.Tper_Desc,
-                c.Tcon_Cod, c.Tcon_Desc, c.{campo_contacto} AS contacto,
-                rpp.Trppbej_Cod
-            FROM TgeCTRel_Persona_Perfil rpp
-            INNER JOIN TgeCTPersonas p ON p.Tper_Cod = rpp.Trppper_Cod
-            INNER JOIN TgeCTContactos c ON c.Tconper_Cod = p.Tper_Cod
+                c.Tcon_Cod, c.Tcon_Desc, 
+                c.Tcon_Email, c.Tcon_Celular,
+                rpp.Trppbej_Cod,
+                prf.Tprf_Cod, prf.Tprf_Desc
+            FROM CTRel_Persona_Perfil rpp
+            INNER JOIN CTPersonas p ON p.Tper_Cod = rpp.Trppper_Cod
+            INNER JOIN CTContactos c ON c.Tconper_Cod = p.Tper_Cod
+            LEFT JOIN CTPerfiles prf ON prf.Tprf_Cod = rpp.Trppprf_Cod
             WHERE rpp.Trppprf_Cod = ? 
                 AND p.Tper_Activo = 1 
                 AND rpp.Trpp_Activo = 1
                 AND c.Tcon_Activo = 1
-                AND c.Tcon_EsPrincipal = 1
-                AND c.{campo_contacto} IS NOT NULL
             """
             
             cursor.execute(query, cfgprf_cod)
             
+            # Obtener nombres de columnas directamente de la BD
+            columnas = [desc[0] for desc in cursor.description]
+            
+            # Construir lista de diccionarios automáticamente
             destinatarios = []
             for row in cursor.fetchall():
-                destinatarios.append({
-                    'persona_cod': row[0],
-                    'persona_desc': row[1],
-                    'contacto_cod': row[2],
-                    'contacto_desc': row[3],
-                    'contacto_valor': row[4],
-                    'bej_cod': row[5]
-                })
+                destinatarios.append(dict(zip(columnas, row)))
             
             cursor.close()
             conn.close()
@@ -186,24 +182,6 @@ class BejermanQueries:
             
         except Exception as e:
             raise Exception(f"Error al ejecutar query dinámico: {e}")
-    
-    def _get_campo_contacto_por_canal(self, cfgcan_cod):
-        """
-        Determina qué campo de contacto usar según el canal.
-        
-        Args:
-            cfgcan_cod (str): Código de canal
-            
-        Returns:
-            str: Nombre del campo (Tcon_Celular, Tcon_Email, etc.)
-        """
-        canales = {
-            '0001': 'Tcon_Celular',  # WhatsApp
-            '0002': 'Tcon_Email',    # Email
-            '0003': 'Tcon_Celular',  # SMS
-            '0004': 'Tcon_Celular'   # Telegram
-        }
-        return canales.get(cfgcan_cod, 'Tcon_Celular')
     
     def procesar_plantilla(self, plantilla_mensaje, datos_query):
         """

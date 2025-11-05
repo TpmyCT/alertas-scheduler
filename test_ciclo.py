@@ -1,18 +1,14 @@
 """
-Script de prueba para ejecutar un ciclo del scheduler sin esperar.
-Útil para probar alertas sin esperar al próximo minuto.
+Test Cycle - Runs one scheduler cycle immediately
 """
 
 from main import AlertScheduler
 
 def main():
-    """Ejecuta un ciclo de prueba del scheduler."""
-    print("🧪 Ejecutando ciclo de prueba...\n")
-    
+    print("🧪 Testing cycle...\n")
     scheduler = AlertScheduler()
-    scheduler.ejecutar_ciclo()
-    
-    print("\n✅ Ciclo de prueba completado")
+    scheduler.run_cycle()
+    print("\n✅ Test completed")
 
 if __name__ == "__main__":
     main()
